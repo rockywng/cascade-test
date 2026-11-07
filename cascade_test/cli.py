@@ -316,6 +316,10 @@ def main(argv: list[str] | None = None) -> int:
         argv = ["run"] + argv
     args = build_parser().parse_args(argv)
     try:
+        sys.stdout.reconfigure(line_buffering=True)  # progress shows up promptly when piped (CI, watch)
+    except AttributeError:
+        pass
+    try:
         return args.fn(args)
     except (ProjectError, SpecError, EngineError) as e:
         print(f"cascade-test: {e}", file=sys.stderr)

@@ -1,8 +1,9 @@
 # cascade-test
 
 The test framework for [Cascade](../cascade-control-plane) pipelines. Write tests as a few lines of
-YAML (or Python), run them on a real Flink in about a second each, and get diffs that say which
-key and which column changed. The same machinery replays recorded production data through a new
+YAML (or Python), run them on a real Flink (a few hundred milliseconds each once the engine is warm;
+`watch` re-runs the affected ones in under a second after a save), and get diffs that say which key
+and which column changed. The same machinery replays recorded production data through a new
 version and posts the differences on the pull request.
 
 ```yaml
