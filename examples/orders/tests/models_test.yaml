@@ -1,0 +1,145 @@
+# Model-level ("unit") tests: one model, fixture rows in, final output out.
+#
+# File-wide defaults keep each test down to the columns it is about:
+#   - base_time: relative times like "+5m" are offsets from it (inputs *and* expected rows)
+#   - rows: default column values per source; "{n}" is the row's number (o1, o2, ...)
+defaults:
+  base_time: "2026-01-01 10:00:00"
+  rows:
+    orders: {order_id: "o{n}", customer_id: c1, amount: 10.00, currency: usd, order_ts: "+{n}m"}
+    customers: {name: Acme, segment: smb, updated_at: "-1h"}
+
+# Named inputs that tests pull in with `use:`
+fixtures:
+  acme:
+    customers:
+      - {customer_id: c1}
+
+tests:
+  - name: ltv_sums_amounts_per_customer
+    target: customer_ltv
+    given:
+      orders:
+        - {amount: 10.00}
+        - {amount: 5.50}
+        - {customer_id: c2, amount: 7.00}
+    expect:
+      rows:
+        - {customer_id: c1, lifetime_value: 15.50, order_count: 2, last_order_ts: "+2m"}
+        - {customer_id: c2, lifetime_value: 7.00, order_count: 1}
+
+  # The changelog an updating model emits, not just its final state. Downstream upsert sinks see
+  # exactly these changes.
+  - name: ltv_emits_retractions_as_orders_arrive
+    target: customer_ltv
+    config: {table.exec.mini-batch.enabled: "false"}   # one change per input row
+    given:
+      orders:
+        - {amount: 10.00}
+        - {amount: 5.00}
+    expect:
+      changelog:
+        - {_op: insert, customer_id: c1, lifetime_value: 10.00}
+        - {_op: update_before, customer_id: c1, lifetime_value: 10.00}
+        - {_op: update_after, customer_id: c1, lifetime_value: 15.00}
+    ordered: true
+
+  # One test per parameter set; ${amount} is substituted everywhere.
+  - name: non_positive_amounts_are_dropped
+    target: clean_orders
+    parameters:
+      zero: {amount: 0}
+      negative: {amount: -3.00}
+    given:
+      orders:
+        - {order_id: good}
+        - {order_id: bad, amount: "${amount}"}
+    expect:
+      rows:
+        - {order_id: good, currency: USD}
+      expectations:
+        positive_amount: 1        # violating rows seen by the data-quality check (before dropping)
+        known_currency: 0
+
+  - name: unknown_currency_is_quarantined
+    target: clean_orders.quarantined
+    given:
+      orders:
+        - {currency: usd}
+        - {currency: jpy, amount: 4.00}
+    expect:
+      rows:
+        - {order_id: o2, currency: JPY, _violated_expectation: known_currency}
+
+  - name: missing_customer_fails_the_job
+    target: clean_orders
+    given:
+      orders:
+        - {customer_id: null}
+    expect:
+      error: has_customer
+
+  - name: enrichment_uses_customer_segment_as_of_order_time
+    target: orders_enriched
+    use: [acme]
+    given:
+      customers:
+        - {_op: update, customer_id: c1, segment: enterprise, updated_at: "+90m"}
+      orders:
+        - {order_id: o1, order_ts: "+0m"}
+        - {order_id: o2, order_ts: "+2h"}
+        - {order_id: o3, customer_id: c9, order_ts: "+2h"}
+    expect:
+      rows:
+        - {order_id: o1, customer_name: Acme, segment: smb}
+        - {order_id: o2, customer_name: Acme, segment: enterprise}
+        - {order_id: o3, customer_name: null, segment: unknown}
+
+  # contains / excludes / count: assert what matters, ignore the rest.
+  - name: enrichment_keeps_every_order
+    target: orders_enriched
+    use: [acme]
+    given:
+      orders: [{}, {}, {customer_id: c2}]
+    expect:
+      count: 3
+      contains:
+        - {order_id: o3, segment: unknown}
+      excludes:
+        - {segment: null}
+
+  # Invariants: SQL predicates every output row must satisfy (checked by Flink on the final state).
+  - name: ltv_is_never_negative_on_generated_data
+    target: customer_ltv
+    given:
+      orders:
+        generate:
+          count: 300
+          seed: 7
+          columns:
+            customer_id: {one_of: [c1, c2, c3, c4]}
+            amount: {between: [-5, 100]}
+            currency: {one_of: [usd, eur, gbp]}
+    expect:
+      count: {min: 1, max: 4}
+      invariants:
+        - lifetime_value > 0
+        - order_count >= 1
+
+  # Snapshot (golden) test: the first run records tests/__snapshots__/models_test.snap.yaml;
+  # later runs diff against it. Re-record intended changes with --update-snapshots.
+  - name: revenue_snapshot
+    target: revenue_per_minute
+    use: [acme]
+    given:
+      orders:
+        file: fixtures/orders.csv
+    expect:
+      snapshot: true
+
+  # UDFs and SQL expressions: checked through Flink itself, so types and NULL handling are real.
+  - name: currency_normalization_expressions
+    calls:
+      - {call: "UPPER('usd')", returns: USD}
+      - {call: "CAST('12.345' AS DECIMAL(12, 2))", returns: 12.35, type: "DECIMAL(12, 2) NOT NULL"}
+      - {call: "COALESCE(CAST(NULL AS STRING), 'unknown')", returns: unknown}

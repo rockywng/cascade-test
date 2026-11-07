@@ -1,0 +1,30 @@
+[project]
+name = "cascade-test"
+version = "0.1.0"
+description = "The test framework for Cascade pipelines: fast fixture tests, snapshots, replay diffs and CI reports"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6", "cascade-dsl"]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "pyflakes"]
+parquet = ["pyarrow>=12"]
+
+[project.scripts]
+cascade-test = "cascade_test.cli:main"
+
+[project.entry-points.pytest11]
+cascade_test = "cascade_test.pytest_plugin"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["cascade_test"]
+
+[tool.setuptools.package-data]
+cascade_test = ["java/src/**/*.java", "java/resources/*", "java/resources/**/*", "templates/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

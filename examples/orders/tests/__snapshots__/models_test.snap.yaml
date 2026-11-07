@@ -1,0 +1,9 @@
+# cascade-test snapshots. Re-record with: cascade-test run --update-snapshots
+revenue_snapshot:
+  revenue_per_minute:
+    columns: [window_start, window_end, segment, currency, revenue, orders]
+    rows:
+    - {window_start: '2026-01-01 10:00:00', window_end: '2026-01-01 10:01:00', segment: smb, currency: USD, revenue: '12.50', orders: 2}
+    - {window_start: '2026-01-01 10:01:00', window_end: '2026-01-01 10:02:00', segment: smb, currency: EUR, revenue: '4.00', orders: 1}
+    - {window_start: '2026-01-01 10:01:00', window_end: '2026-01-01 10:02:00', segment: unknown, currency: USD, revenue: '99.99', orders: 1}
+    - {window_start: '2026-01-01 10:02:00', window_end: '2026-01-01 10:03:00', segment: smb, currency: USD, revenue: '1.00', orders: 1}

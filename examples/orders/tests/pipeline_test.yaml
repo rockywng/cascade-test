@@ -1,0 +1,62 @@
+# Integration tests: the whole pipeline as one job, every sink captured. Sinks keep their real
+# INSERT, changelog mode and primary key, so what is compared is what the external system would
+# hold: the upsert sink by key, the append sink row by row, quarantine topics included.
+defaults:
+  base_time: "2026-01-01 10:00:00"
+  rows:
+    orders: {order_id: "o{n}", customer_id: c1, amount: 10.00, currency: usd, order_ts: "+{n}m"}
+    customers: {name: Acme, segment: smb, updated_at: "-1h"}
+
+tests:
+  - name: one_day_of_orders_end_to_end
+    target: pipeline
+    given:
+      customers:
+        - {customer_id: c1}
+        - {customer_id: c2, name: Globex, segment: enterprise}
+      orders:
+        - {}
+        - {amount: 5.00}
+        - {customer_id: c2, amount: 100.00, currency: eur}
+        - {customer_id: c2, amount: -1.00}          # dropped: positive_amount
+        - {customer_id: c2, currency: jpy}          # quarantined: known_currency
+    expect:
+      sinks:
+        ltv_to_kafka:
+          rows:
+            - {customer_id: c1, lifetime_value: 15.00, order_count: 2}
+            - {customer_id: c2, lifetime_value: 100.00, order_count: 1}
+        revenue_to_lake:
+          count: 3
+          contains:
+            - {window_start: "+3m", segment: enterprise, currency: EUR, revenue: 100.00}
+        clean_orders.quarantined:
+          rows:
+            - {order_id: o5, _violated_expectation: known_currency}
+      expectations:
+        clean_orders.positive_amount: 1
+        clean_orders.known_currency: 1
+
+  - name: generated_traffic_keeps_sink_invariants
+    target: pipeline
+    given:
+      customers:
+        - {customer_id: c1}
+        - {customer_id: c2}
+      orders:
+        generate:
+          count: 500
+          seed: 42
+          step: 7s
+          jitter: 3s
+          columns:
+            customer_id: {one_of: [c1, c2, c3]}
+            amount: {between: [1, 250]}
+            currency: {one_of: [usd, eur, gbp]}
+    expect:
+      sinks:
+        ltv_to_kafka:
+          count: 3
+          invariants: ["lifetime_value > 0", "order_count > 0"]
+        revenue_to_lake:
+          invariants: ["revenue > 0", "window_end = window_start + INTERVAL '1' MINUTE"]

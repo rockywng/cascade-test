@@ -1,0 +1,86 @@
+# Event time, made deterministic. Each source replays its rows in order; after every row the
+# source emits its declared watermark (max event time - max_out_of_orderness, 5s for orders).
+# A row at or behind the watermark is *late*: windows that already fired drop it.
+# `cascade-test timeline examples/orders -k <test>` prints the row-by-row timeline.
+defaults:
+  base_time: "2026-01-01 10:00:00"
+  rows:
+    orders: {order_id: "o{n}", customer_id: c1, amount: 1.00, currency: usd}
+
+tests:
+  - name: late_order_misses_its_closed_window
+    target: orders_per_minute
+    given:
+      orders:
+        - {order_ts: "+10s"}
+        - {order_ts: "+90s"}       # watermark -> 10:01:25: the 10:00 window fires
+        - {order_ts: "+20s"}       # late: dropped
+    expect:
+      rows:
+        - {window_start: "+0m", orders: 1}
+        - {window_start: "+1m", orders: 1}
+      late: {orders: [3]}
+
+  # Kafka partitions: the source watermark is the minimum over partitions, so one partition that
+  # is behind holds back every window. Here partition 1 is still at 10:00:05, so the order at
+  # 10:00:30 in partition 0 is on time even though partition 0 has reached 10:03.
+  - name: a_slow_partition_holds_back_the_watermark
+    target: orders_per_minute
+    partitions: {orders: 2}
+    given:
+      orders:
+        - {_partition: 1, order_ts: "+5s"}
+        - {_partition: 0, order_ts: "+3m"}
+        - {_partition: 0, order_ts: "+30s"}
+    expect:
+      rows:
+        - {window_start: "+0m", orders: 2}
+        - {window_start: "+3m", orders: 1}
+      late: {orders: 0}
+
+  # ...until the slow partition goes idle (source idle_timeout): then it no longer counts.
+  - name: an_idle_partition_stops_holding_back_the_watermark
+    target: orders_per_minute
+    partitions: {orders: 2}
+    given:
+      orders:
+        - {_partition: 1, order_ts: "+5s"}
+        - {_partition: 0, order_ts: "+3m"}
+        - {_idle: 1}
+        - {_partition: 0, order_ts: "+30s"}
+    expect:
+      rows:
+        - {window_start: "+0m", orders: 1}
+        - {window_start: "+3m", orders: 1}
+      late: {orders: [3]}
+
+  # With `watermarks: manual` only explicit _watermark rows advance event time.
+  - name: manual_watermarks_decide_when_windows_close
+    target: orders_per_minute
+    watermarks: manual
+    given:
+      orders:
+        - {order_ts: "+10s"}
+        - {_watermark: "+1m"}
+        - {order_ts: "+30s"}       # late: the watermark already passed the 10:00 window
+        - {order_ts: "+70s"}
+    expect:
+      rows:
+        - {window_start: "+0m", orders: 1}
+        - {window_start: "+1m", orders: 1}
+      late: {orders: [2]}
+
+  # Inputs that never advance the watermark far enough are flushed at the end of input
+  # (event time jumps to +inf), so every window fires once.
+  - name: every_window_fires_at_end_of_input
+    target: orders_per_minute
+    watermarks: end_of_input
+    given:
+      orders:
+        - {order_ts: "+10s"}
+        - {order_ts: "+70s"}
+        - {order_ts: "+20s"}       # not late: no watermark until the end
+    expect:
+      rows:
+        - {window_start: "+0m", orders: 2}
+        - {window_start: "+1m", orders: 1}

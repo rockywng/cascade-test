@@ -1,0 +1,106 @@
+name: cascade-test
+description: >
+  Test a Cascade pipeline on every pull request: run its tests with coverage, check state
+  compatibility against the deployed version, replay recorded data through both versions, and keep
+  one up-to-date comment on the PR with the results.
+inputs:
+  project:
+    description: Path of the pipeline project (the directory with pipeline.yaml or pipeline.py)
+    required: true
+  baseline:
+    description: "Deployed version to compare with: a path, or git:<ref> (check out with fetch-depth: 0)"
+    default: ""
+  recording:
+    description: Recording directory to replay through baseline and candidate (needs baseline)
+    default: ""
+  last:
+    description: Replay only the most recent span of the recording, e.g. 6h
+    default: ""
+  min-coverage:
+    description: Fail if pipeline coverage (models, sinks, expectations) is below this percentage
+    default: ""
+  allow-state-loss:
+    description: Do not fail when the upgrade would discard state
+    default: "false"
+  flink-version:
+    description: Flink distribution to test against
+    default: "2.3.0"
+  cascade-dsl-ref:
+    description: Branch, tag or commit of cascade-dsl
+    default: main
+  comment:
+    description: Post (and update) the report as a PR comment
+    default: "true"
+outputs:
+  report:
+    description: Path of the Markdown report
+    value: ${{ steps.ci.outputs.report }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: "17"
+    - name: Cache Flink
+      id: flink-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/flink-${{ inputs.flink-version }}
+        key: flink-${{ inputs.flink-version }}
+    - name: Download Flink
+      if: steps.flink-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        f="flink-${{ inputs.flink-version }}/flink-${{ inputs.flink-version }}-bin-scala_2.12.tgz"
+        for url in "https://dlcdn.apache.org/flink/$f" "https://archive.apache.org/dist/flink/$f"; do
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/flink.tgz "$url" && break
+        done
+        tar xzf /tmp/flink.tgz -C ~
+    - name: Check out cascade-dsl
+      uses: actions/checkout@v4
+      with:
+        repository: rockywng/cascade-dsl
+        ref: ${{ inputs.cascade-dsl-ref }}
+        path: .cascade-test/cascade-dsl
+        token: ${{ env.CASCADE_DSL_TOKEN || github.token }}
+    - name: Install cascade-dsl and cascade-test
+      shell: bash
+      run: |
+        pip install -q -e .cascade-test/cascade-dsl -e "${{ github.action_path }}"
+        FLINK_HOME=~/flink-${{ inputs.flink-version }} .cascade-test/cascade-dsl/runtime/build.sh
+    - name: cascade-test ci
+      id: ci
+      shell: bash
+      run: |
+        export FLINK_HOME=~/flink-${{ inputs.flink-version }}
+        args=("${{ inputs.project }}" --markdown cascade-test-report.md --junit cascade-test-junit.xml)
+        [ -n "${{ inputs.baseline }}" ] && args+=(--baseline "${{ inputs.baseline }}")
+        [ -n "${{ inputs.recording }}" ] && args+=(--recording "${{ inputs.recording }}")
+        [ -n "${{ inputs.last }}" ] && args+=(--last "${{ inputs.last }}")
+        [ -n "${{ inputs.min-coverage }}" ] && args+=(--min-coverage "${{ inputs.min-coverage }}")
+        [ "${{ inputs.allow-state-loss }}" = "true" ] && args+=(--allow-state-loss)
+        echo "report=cascade-test-report.md" >> "$GITHUB_OUTPUT"
+        set +e
+        cascade-test ci "${args[@]}"
+        echo "exit=$?" >> "$GITHUB_OUTPUT"
+    - name: Comment on the pull request
+      if: inputs.comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        marker='<!-- cascade-test-report -->'
+        repo="${{ github.repository }}"; pr="${{ github.event.pull_request.number }}"
+        id=$(gh api "repos/$repo/issues/$pr/comments" --paginate -q ".[] | select(.body | startswith(\"$marker\")) | .id" | head -1)
+        if [ -n "$id" ]; then
+          gh api -X PATCH "repos/$repo/issues/comments/$id" -F body=@cascade-test-report.md > /dev/null
+        else
+          gh api "repos/$repo/issues/$pr/comments" -F body=@cascade-test-report.md > /dev/null
+        fi
+    - name: Result
+      shell: bash
+      run: exit ${{ steps.ci.outputs.exit }}
