@@ -273,9 +273,9 @@ class ReplayReport:
                            "note": s.note, "diff": D.to_json(s.diff) if s.diff else None} for s in self.sinks]}
 
 
-def _case(project: Project, given: dict, timeout: int, partitions: dict) -> TestCase:
+def _case(project: Project, given: dict, timeout: int, partitions: dict, config: dict | None = None) -> TestCase:
     return TestCase(name="replay", loc=Location("<replay>"), target=PIPELINE, given=given, expect={},
-                    timeout=timeout, partitions=partitions,
+                    timeout=timeout, partitions=partitions, config=dict(config or {}),
                     file=os.path.join(project.root, "tests", "<replay>"))
 
 
@@ -303,13 +303,15 @@ def given_from(project: Project, rec: Recording, last_ms, limit, order, warnings
     return given, partitions
 
 
-def run_versions(engine: Engine, versions: list[tuple[Project, dict, dict]], timeout: int):
-    """Run each (project, given, partitions) as a whole-pipeline job; returns [TestResult]."""
+def run_versions(engine: Engine, versions: list[tuple[Project, dict, dict]], timeout: int,
+                 config: dict | None = None):
+    """Run each (project, given, partitions) as a whole-pipeline job; returns [TestResult].
+    `config` is extra Flink configuration for every job (e.g. a savepoint to restore from)."""
     work = tempfile.mkdtemp(prefix="cascade-replay-")
     try:
         preps = []
         for i, (proj, given, parts) in enumerate(versions):
-            prep = P.prepare(proj, _case(proj, given, timeout, parts), os.path.join(work, f"v{i}"))
+            prep = P.prepare(proj, _case(proj, given, timeout, parts, config), os.path.join(work, f"v{i}"))
             if prep.error:
                 raise ReplayError(f"{proj.name}: {prep.error}")
             preps.append(prep)
@@ -414,9 +416,51 @@ def open_baseline(candidate_path: str, spec: str):
 def replay(engine: Engine, candidate: Project, rec: Recording, *, baseline: Project | None = None,
            baseline_label: str = "", golden: str | None = None, update_golden: bool = False,
            last: str | None = None, limit: int | None = None, order: str = "recorded", keys: dict | None = None,
-           tolerance=None, ignore=(), timeout: int = 600) -> ReplayReport:
+           tolerance=None, ignore=(), timeout: int = 600, savepoint: str | None = None,
+           state_drop=(), state_keep=()) -> ReplayReport:
+    if (state_drop or state_keep) and not savepoint:
+        raise ReplayError("--state-drop/--state-keep need --from-savepoint")
     last_ms = timeutil.parse_duration_ms(last) if last else None
     report = ReplayReport(candidate.name, rec, baseline_label or (f"golden `{golden}`" if golden else "?"))
+    state_dir = None
+    config = None
+    try:
+        if savepoint:
+            config, state_dir = restore_config(engine, savepoint, state_drop, state_keep, report.warnings)
+        return _replay(engine, candidate, rec, report, baseline, golden, update_golden, last, last_ms, limit, order,
+                       keys, tolerance, ignore, timeout, config)
+    finally:
+        if state_dir:
+            shutil.rmtree(state_dir, ignore_errors=True)
+
+
+def restore_config(engine, savepoint: str, drop, keep, warnings: list[str]) -> tuple[dict, str | None]:
+    """Flink configuration that starts each replayed job from `savepoint`, after removing operators'
+    state from a copy when asked (State Processor API). Returns (config, temporary directory)."""
+    from .engine import state_tool
+    path = os.path.abspath(savepoint)
+    if not os.path.isfile(os.path.join(path, "_metadata")):
+        raise ReplayError(f"{savepoint} is not a savepoint (no _metadata file); pass the savepoint directory")
+    tmp = None
+    if drop or keep:
+        tmp = tempfile.mkdtemp(prefix="cascade-state-")
+        out = os.path.join(tmp, "savepoint")
+        args = ["subset", path, out] + [x for u in drop for x in ("--drop", u)] + [x for u in keep for x in ("--keep", u)]
+        res = state_tool(engine.flink_home, args)
+        for missing in res.get("not_in_savepoint") or []:
+            warnings.append(f"state: '{missing}' is not an operator of the savepoint")
+        warnings.append(f"state: restored from a copy of the savepoint without {len(res['removed'])} operator(s)' "
+                        f"state ({len(res['kept'])} kept)")
+        path = out
+    else:
+        warnings.append(f"state: restored from savepoint {savepoint}")
+    # operators the candidate no longer has must not fail the replay: it is a diff of outputs, and the
+    # state-compatibility check (`cascade-test ci`) is what judges the change
+    return {"execution.state-recovery.path": path, "execution.state-recovery.ignore-unclaimed-state": "true"}, tmp
+
+
+def _replay(engine, candidate, rec, report, baseline, golden, update_golden, last, last_ms, limit, order,
+            keys, tolerance, ignore, timeout, config) -> ReplayReport:
     given, parts = given_from(candidate, rec, last_ms, limit, order, report.warnings)
     report.replayed = sum(len(v) for k, v in given.items() if k in rec.records)
     if last:
@@ -425,7 +469,7 @@ def replay(engine: Engine, candidate: Project, rec: Recording, *, baseline: Proj
     if baseline is not None:
         bgiven, bparts = given_from(baseline, rec, last_ms, limit, order, [])
         versions.append((baseline, bgiven, bparts))
-    results = run_versions(engine, versions, timeout)
+    results = run_versions(engine, versions, timeout, config)
     report.millis = max(r.millis for r in results)
     for label, r in zip(("candidate", "baseline"), results):
         if r.job_error:
@@ -471,7 +515,8 @@ def cmd_replay(args) -> int:
             report = replay(engine, candidate, rec, baseline=base, baseline_label=label, golden=args.golden,
                             update_golden=args.update_golden, last=args.last, limit=args.limit, order=args.order,
                             keys=parse_keys(args.key), tolerance=args.tolerance, ignore=args.ignore,
-                            timeout=args.timeout)
+                            timeout=args.timeout, savepoint=args.from_savepoint, state_drop=args.state_drop,
+                            state_keep=args.state_keep)
     finally:
         cleanup()
     print(report.text(style))

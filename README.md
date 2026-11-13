@@ -138,6 +138,7 @@ ERROR typo_in_fixture  (customer_ltv, 0 ms)
 | `cascade-test replay PATH --recording DIR --baseline git:main` | replay recorded data through two versions and diff every sink |
 | `cascade-test record --source S --input dump.json -o DIR` | import a `kcat -C -J` dump (or JSON lines, Debezium) as a recording |
 | `cascade-test diff A B --key k` | diff two captured outputs, e.g. a shadow job's sink vs production's |
+| `cascade-test state inspect DIR` / `state subset DIR OUT --drop UID` | list a savepoint's operators, or copy it without some operators' state |
 | `cascade-test ci PATH --baseline git:origin/main --recording DIR` | tests + coverage + state-compatibility + replay diff, one Markdown report |
 | `cascade-test doctor` | check Java, Flink, cascade-dsl jars and the engine |
 
@@ -201,6 +202,16 @@ Replays are deterministic: partitions keep their recorded interleaving and per-p
 watermarks, lookups come from recorded cassettes, sinks are captured (nothing is written
 anywhere), and columns computed from processing time or randomness are left out and listed.
 Replaying a version against itself reports no differences.
+
+To exercise stateful logic against real state, start the replayed jobs from a production savepoint
+(`--from-savepoint DIR`). Operators in the savepoint that the candidate no longer has are skipped
+rather than failing the run. `--state-drop UID` (or `--state-keep UID`) first writes a copy of the
+savepoint without (or with only) those operators' state, using Flink's State Processor API, so a
+changed operator does not restore old state into a new query. `cascade-test state inspect DIR`
+shows which operators hold how much state, and `cascade-test state subset DIR OUT --drop UID` writes
+the copy on its own. Operators are named by their pinned UID or by the hex id `inspect` prints. The
+unit is a whole operator: a SQL operator's keyed state can't be filtered by key without that
+operator's code. Needs a Flink 2.x distribution that ships `opt/flink-state-processor-api`.
 
 In GitHub Actions, the bundled action runs `cascade-test ci` and keeps one up-to-date comment on
 the PR with test results, coverage, the state-compatibility verdict and the replay diff:

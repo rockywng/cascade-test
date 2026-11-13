@@ -24,7 +24,7 @@ from .project import Project, ProjectError
 from .runner import Options
 from .spec import SpecError
 
-COMMANDS = {"run", "watch", "new", "timeline", "replay", "record", "diff", "ci", "doctor"}
+COMMANDS = {"run", "watch", "new", "timeline", "replay", "record", "diff", "ci", "doctor", "state"}
 
 
 def find_projects(paths: list[str]) -> list[str]:
@@ -155,6 +155,11 @@ def cmd_replay(args) -> int:
     return run(args)
 
 
+def cmd_state(args) -> int:
+    from .state import run
+    return run(args)
+
+
 def cmd_record(args) -> int:
     from .replay import cmd_record as run
     return run(args)
@@ -267,8 +272,31 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", help="write the diff report as JSON here")
     sp.add_argument("--allow-diff", action="store_true", help="exit 0 even when outputs differ")
     sp.add_argument("--timeout", type=int, default=600)
+    sp.add_argument("--from-savepoint", help="start the replayed job(s) from this savepoint directory, so "
+                                             "stateful logic runs against real state")
+    sp.add_argument("--state-drop", action="append", default=[], metavar="UID",
+                    help="with --from-savepoint: leave this operator's state out (an operator UID or id; repeatable)")
+    sp.add_argument("--state-keep", action="append", default=[], metavar="UID",
+                    help="with --from-savepoint: keep only this operator's state (repeatable)")
     common(sp, paths=None)
     sp.set_defaults(fn=cmd_replay)
+
+    sp = sub.add_parser("state", help="inspect a savepoint, or write a copy with some operators' state removed")
+    ss = sp.add_subparsers(dest="state_cmd", required=True)
+    si = ss.add_parser("inspect", help="list a savepoint's operators and their state sizes")
+    si.add_argument("savepoint")
+    si.add_argument("--uid", action="append", default=[], help="name the operator with this UID (repeatable)")
+    si.add_argument("--flink-home", help="Flink distribution (default: $FLINK_HOME)")
+    si.add_argument("--json", action="store_true")
+    si.set_defaults(fn=cmd_state)
+    sb = ss.add_parser("subset", help="write a copy of a savepoint without (--drop) or with only (--keep) some operators")
+    sb.add_argument("savepoint")
+    sb.add_argument("out", help="new savepoint directory (must not exist)")
+    sb.add_argument("--drop", action="append", default=[], metavar="UID", help="remove this operator's state")
+    sb.add_argument("--keep", action="append", default=[], metavar="UID", help="remove every other operator's state")
+    sb.add_argument("--flink-home", help="Flink distribution (default: $FLINK_HOME)")
+    sb.add_argument("--json", action="store_true")
+    sb.set_defaults(fn=cmd_state)
 
     sp = sub.add_parser("record", help="import a topic dump (kcat -J or JSON lines) as a recording")
     sp.add_argument("--source", required=True, help="the pipeline source the records belong to")
