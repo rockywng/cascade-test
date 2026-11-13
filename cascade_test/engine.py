@@ -51,13 +51,23 @@ def dsl_jars() -> tuple[str, str]:
     return runtime, tools
 
 
-def _sources() -> list[str]:
-    return sorted(glob.glob(os.path.join(JAVA_DIR, "src", "**", "*.java"), recursive=True))
+def state_processor_jar(flink_home: str) -> str | None:
+    """The State Processor API jar of a Flink distribution (it ships in opt/), if it has one."""
+    found = sorted(glob.glob(os.path.join(flink_home, "opt", "flink-state-processor-api-*.jar")))
+    return found[0] if found else None
+
+
+def _sources(flink_home: str | None = None) -> list[str]:
+    out = sorted(glob.glob(os.path.join(JAVA_DIR, "src", "**", "*.java"), recursive=True))
+    # StateTool needs the State Processor API; a distribution without it still gets the test engine
+    if flink_home is None or state_processor_jar(flink_home) is None:
+        out = [f for f in out if not f.endswith("StateTool.java")]
+    return out
 
 
 def _fingerprint(flink_home: str) -> str:
     h = hashlib.sha256()
-    for path in _sources() + sorted(glob.glob(os.path.join(JAVA_DIR, "resources", "**", "*"), recursive=True)):
+    for path in _sources(flink_home) + sorted(glob.glob(os.path.join(JAVA_DIR, "resources", "**", "*"), recursive=True)):
         if os.path.isfile(path):
             h.update(path.encode())
             with open(path, "rb") as f:
@@ -81,7 +91,9 @@ def engine_jar(flink_home: str) -> str:
         classes = os.path.join(out, "classes")
         os.makedirs(classes)
         cp = os.path.join(flink_home, "lib", "*")
-        proc = subprocess.run([javac, "--release", "11", "-nowarn", "-cp", cp, "-d", classes, *_sources()],
+        if state_processor_jar(flink_home):
+            cp += os.pathsep + state_processor_jar(flink_home)
+        proc = subprocess.run([javac, "--release", "11", "-nowarn", "-cp", cp, "-d", classes, *_sources(flink_home)],
                               capture_output=True, text=True)
         if proc.returncode != 0:
             raise EngineError(f"building the test engine against {flink_home} failed:\n{proc.stderr[-3000:]}")
@@ -92,6 +104,33 @@ def engine_jar(flink_home: str) -> str:
             raise EngineError(f"packaging the test engine failed:\n{proc.stderr}")
         os.replace(tmp, jar)
     return jar
+
+
+class StateToolError(RuntimeError):
+    pass
+
+
+def state_tool(flink_home: str, args: list[str], timeout: int = 600) -> dict:
+    """Run `StateTool` (savepoint inspection and surgery with the State Processor API) and return its
+    JSON result. Raises StateToolError with the tool's message when it fails."""
+    from cascade_dsl import jvm
+    if state_processor_jar(flink_home) is None:
+        raise StateToolError(f"{flink_home} has no opt/flink-state-processor-api jar: use a Flink 2.x distribution")
+    t = jvm.Tools(flink_home)
+    cp = [engine_jar(flink_home), os.path.join(flink_home, "lib", "*"), state_processor_jar(flink_home)]
+    cmd = [t._java(), *t._java_opts(), f"-Dlog4j.configurationFile={os.path.join(JAVA_DIR, 'resources', 'log4j2.properties')}",
+           "-XX:TieredStopAtLevel=1", "-cp", os.pathsep.join(cp), "dev.cascade.testengine.StateTool", *args]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise StateToolError(f"the state tool did not finish in {timeout}s") from None
+    try:
+        out = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        raise StateToolError(f"the state tool failed (exit {proc.returncode}): {proc.stderr[-500:]}") from None
+    if "error" in out:
+        raise StateToolError(out["error"])
+    return out
 
 
 class Engine:
