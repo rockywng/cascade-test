@@ -5,6 +5,7 @@
     cascade-test new PATH TARGET       scaffold a test for a model/sink (--record fills in the output)
     cascade-test timeline PATH -k T    show a test's event-time timeline: rows, watermarks, late rows
     cascade-test replay PATH ...       replay recorded production data; diff against a baseline/golden
+    cascade-test trace PATH ...        follow input rows (given, or a seeded sample of a recording) stage by stage
     cascade-test record ...            turn a topic dump (kcat -J, JSON lines) into a recording
     cascade-test diff A B --key k      diff two captured outputs (e.g. shadow vs prod sink dumps)
     cascade-test ci PATH ...           everything a PR needs: tests, coverage, upgrade check, replay diff
@@ -24,7 +25,7 @@ from .project import Project, ProjectError
 from .runner import Options
 from .spec import SpecError
 
-COMMANDS = {"run", "watch", "new", "timeline", "replay", "record", "diff", "ci", "doctor", "state"}
+COMMANDS = {"run", "watch", "new", "timeline", "replay", "record", "diff", "ci", "doctor", "state", "trace"}
 
 
 def find_projects(paths: list[str]) -> list[str]:
@@ -155,6 +156,11 @@ def cmd_replay(args) -> int:
     return run(args)
 
 
+def cmd_trace(args) -> int:
+    from .trace import run
+    return run(args)
+
+
 def cmd_state(args) -> int:
     from .state import run
     return run(args)
@@ -278,8 +284,25 @@ def build_parser() -> argparse.ArgumentParser:
                     help="with --from-savepoint: leave this operator's state out (an operator UID or id; repeatable)")
     sp.add_argument("--state-keep", action="append", default=[], metavar="UID",
                     help="with --from-savepoint: keep only this operator's state (repeatable)")
+    sp.add_argument("--clock", metavar="TIME", help="freeze CURRENT_TIMESTAMP, NOW() and the other wall-clock "
+                                                    "functions at this instant (UTC, e.g. '2026-11-06 12:00:00'), "
+                                                    "so their columns are compared instead of ignored")
     common(sp, paths=None)
     sp.set_defaults(fn=cmd_replay)
+
+    sp = sub.add_parser("trace", help="follow input rows through every model and sink, stage by stage")
+    sp.add_argument("path")
+    sp.add_argument("--given", help="rows to trace: a YAML/JSON file of {source: [row, ...]}")
+    sp.add_argument("--recording", help="trace a sample of this recording instead")
+    sp.add_argument("--sample", type=int, default=5, help="records per source to sample (default 5)")
+    sp.add_argument("--seed", type=int, default=0, help="the sample is seeded: the same seed, the same rows")
+    sp.add_argument("--stage", action="append", help="only this model or sink (repeatable)")
+    sp.add_argument("--rows", type=int, default=5, help="rows to print per stage (default 5)")
+    sp.add_argument("--clock", metavar="TIME", help="freeze CURRENT_TIMESTAMP, NOW() ... at this instant (UTC)")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--timeout", type=int, default=120)
+    common(sp, paths=None)
+    sp.set_defaults(fn=cmd_trace)
 
     sp = sub.add_parser("state", help="inspect a savepoint, or write a copy with some operators' state removed")
     ss = sp.add_subparsers(dest="state_cmd", required=True)

@@ -32,12 +32,12 @@ from cascade_dsl.loader import _Loader
 
 TEST_KEYS = {"name", "description", "target", "given", "use", "expect", "ordered", "watermarks", "partitions",
              "base_time", "defaults", "key", "tolerance", "ignore_columns", "parallelism", "timeout", "tags",
-             "skip", "only", "parameters", "calls", "config"}
+             "skip", "only", "parameters", "calls", "config", "clock"}
 EXPECT_KEYS = {"rows", "contains", "excludes", "count", "changelog", "empty", "error", "snapshot",
                "invariants", "expectations", "late", "sinks"}
 OUTPUT_EXPECT_KEYS = EXPECT_KEYS - {"error", "expectations", "late", "sinks"}
 FILE_KEYS = {"tests", "defaults", "fixtures"}
-DEFAULT_KEYS = {"base_time", "rows", "watermarks", "tolerance", "timeout", "parallelism", "ignore_columns",
+DEFAULT_KEYS = {"clock", "base_time", "rows", "watermarks", "tolerance", "timeout", "parallelism", "ignore_columns",
                 "partitions", "config", "ordered"}
 WATERMARK_MODES = ("per_row", "manual", "end_of_input")
 PIPELINE = "pipeline"
@@ -79,6 +79,7 @@ class TestCase:
     only: bool = False
     calls: list[dict] | None = None
     config: dict = field(default_factory=dict)
+    clock: str | None = None  # freeze CURRENT_TIMESTAMP, NOW() ... at this instant (see clock.py)
     file: str = ""  # the test file (absolute)
     params: dict | None = None
 
@@ -271,6 +272,7 @@ def _case(t: dict, loc: Location, defaults: dict, fixtures: dict, path: str, par
         name=name, loc=loc, target=target, given=given, expect=expect, description=t.get("description"),
         ordered=bool(t.get("ordered", defaults.get("ordered", False))), watermarks=wm, partitions=partitions,
         base_time=str(t.get("base_time") or defaults.get("base_time") or "") or None,
+        clock=str(t.get("clock") or defaults.get("clock") or "") or None,
         defaults=row_defaults, key=[key] if isinstance(key, str) else key,
         tolerance=t.get("tolerance", defaults.get("tolerance")),
         ignore_columns=list(t.get("ignore_columns") or defaults.get("ignore_columns") or []),

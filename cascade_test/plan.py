@@ -21,6 +21,7 @@ from cascade_dsl.lower import Stmt, q
 
 from . import fixtures as F
 from . import timeutil
+from .clock import ClockError
 from .project import Project
 from .spec import PIPELINE, TestCase
 
@@ -64,6 +65,8 @@ def prepare(project: Project, case: TestCase, workdir: str, coverage: bool = Fal
         prep.error = f"bad fixture: {e}"
     except PlanError as e:
         prep.error = str(e)
+    except ClockError as e:
+        prep.error = f"bad clock: {e}"
     return prep
 
 
@@ -184,6 +187,14 @@ def _prepare(project: Project, case: TestCase, workdir: str, coverage: bool, pre
                                     "capture": o.meta["capture"]})
         else:
             payload_outputs.append({"name": o.name, "query": o.meta["query"]})
+    if case.clock:
+        from . import clock
+        when = clock.instant(case.clock, prep.base_time)
+        setup = [clock.freeze(s, when)[0] for s in setup]
+        for o in payload_outputs:
+            for k in ("insert", "query"):
+                if k in o:
+                    o[k] = clock.freeze(o[k], when)[0]
     prep.requests.append(Request({"id": f"{case.id}#{_uid()}", "setup": setup, "outputs": payload_outputs,
                                   "timeout": case.timeout, "config": {}}, outputs))
 

@@ -136,6 +136,7 @@ ERROR typo_in_fixture  (customer_ltv, 0 ms)
 | `cascade-test new PATH TARGET [--record]` | scaffold a test from the pipeline's schemas; `--record` fills in the actual output |
 | `cascade-test timeline PATH -k NAME` | a test's event-time timeline: rows, watermarks, late rows |
 | `cascade-test replay PATH --recording DIR --baseline git:main` | replay recorded data through two versions and diff every sink |
+| `cascade-test trace PATH --recording DIR --sample 5 --seed 1` (or `--given rows.yaml`) | follow sampled (or given) input rows through every model and sink; shows where rows stop appearing and which expectation rejected them |
 | `cascade-test record --source S --input dump.json -o DIR` | import a `kcat -C -J` dump (or JSON lines, Debezium) as a recording |
 | `cascade-test diff A B --key k` | diff two captured outputs, e.g. a shadow job's sink vs production's |
 | `cascade-test state inspect DIR` / `state subset DIR OUT --drop UID` | list a savepoint's operators, or copy it without some operators' state |
@@ -202,6 +203,12 @@ Replays are deterministic: partitions keep their recorded interleaving and per-p
 watermarks, lookups come from recorded cassettes, sinks are captured (nothing is written
 anywhere), and columns computed from processing time or randomness are left out and listed.
 Replaying a version against itself reports no differences.
+
+A pipeline that stamps rows with `CURRENT_TIMESTAMP`, `NOW()` or `CURRENT_DATE` reads the wall clock, so
+its output changes with every run. `--clock '2026-11-06 12:00:00'` freezes those functions at one
+instant (the SQL the engine runs gets literals; the same `clock:` key works in a test), and the columns
+they feed are then compared instead of left out. `PROCTIME()` (processing-time windows) still runs on
+wall time, and so do randomness (`RAND`, `UUID`).
 
 To exercise stateful logic against real state, start the replayed jobs from a production savepoint
 (`--from-savepoint DIR`). Operators in the savepoint that the candidate no longer has are skipped
