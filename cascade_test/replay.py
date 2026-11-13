@@ -273,9 +273,10 @@ class ReplayReport:
                            "note": s.note, "diff": D.to_json(s.diff) if s.diff else None} for s in self.sinks]}
 
 
-def _case(project: Project, given: dict, timeout: int, partitions: dict, config: dict | None = None) -> TestCase:
+def _case(project: Project, given: dict, timeout: int, partitions: dict, config: dict | None = None,
+          clock: str | None = None) -> TestCase:
     return TestCase(name="replay", loc=Location("<replay>"), target=PIPELINE, given=given, expect={},
-                    timeout=timeout, partitions=partitions, config=dict(config or {}),
+                    timeout=timeout, partitions=partitions, config=dict(config or {}), clock=clock,
                     file=os.path.join(project.root, "tests", "<replay>"))
 
 
@@ -304,14 +305,15 @@ def given_from(project: Project, rec: Recording, last_ms, limit, order, warnings
 
 
 def run_versions(engine: Engine, versions: list[tuple[Project, dict, dict]], timeout: int,
-                 config: dict | None = None):
+                 config: dict | None = None, clock: str | None = None):
     """Run each (project, given, partitions) as a whole-pipeline job; returns [TestResult].
-    `config` is extra Flink configuration for every job (e.g. a savepoint to restore from)."""
+    `config` is extra Flink configuration for every job (e.g. a savepoint to restore from); `clock`
+    freezes the wall-clock functions at that instant (clock.py)."""
     work = tempfile.mkdtemp(prefix="cascade-replay-")
     try:
         preps = []
         for i, (proj, given, parts) in enumerate(versions):
-            prep = P.prepare(proj, _case(proj, given, timeout, parts, config), os.path.join(work, f"v{i}"))
+            prep = P.prepare(proj, _case(proj, given, timeout, parts, config, clock), os.path.join(work, f"v{i}"))
             if prep.error:
                 raise ReplayError(f"{proj.name}: {prep.error}")
             preps.append(prep)
@@ -328,16 +330,16 @@ def sink_outputs(res: R.TestResult) -> dict:
 
 
 def compare(report: ReplayReport, candidate: Project, cand: dict, base: dict, keys: dict, tolerance, ignore,
-            base_project: Project | None = None):
+            base_project: Project | None = None, frozen: bool = False):
     for sink in list(dict.fromkeys(list(base) + list(cand))):
         b, c = base.get(sink), cand.get(sink)
         if b is None or c is None:
             report.sinks.append(SinkDiff(sink, len(b.rows) if b else None, len(c.rows) if c else None, None,
                                          "new sink" if b is None else "sink removed"))
             continue
-        nondet = set(candidate.nondeterministic_columns(sink))
+        nondet = set(candidate.nondeterministic_columns(sink, frozen))
         if base_project is not None:
-            nondet |= set(base_project.nondeterministic_columns(sink))
+            nondet |= set(base_project.nondeterministic_columns(sink, frozen))
         common = [n for n in c.names if n in b.types]
         cols = [n for n in common if n not in nondet and n not in ignore]
         if nondet & set(common):
@@ -417,7 +419,7 @@ def replay(engine: Engine, candidate: Project, rec: Recording, *, baseline: Proj
            baseline_label: str = "", golden: str | None = None, update_golden: bool = False,
            last: str | None = None, limit: int | None = None, order: str = "recorded", keys: dict | None = None,
            tolerance=None, ignore=(), timeout: int = 600, savepoint: str | None = None,
-           state_drop=(), state_keep=()) -> ReplayReport:
+           state_drop=(), state_keep=(), clock: str | None = None) -> ReplayReport:
     if (state_drop or state_keep) and not savepoint:
         raise ReplayError("--state-drop/--state-keep need --from-savepoint")
     last_ms = timeutil.parse_duration_ms(last) if last else None
@@ -428,7 +430,7 @@ def replay(engine: Engine, candidate: Project, rec: Recording, *, baseline: Proj
         if savepoint:
             config, state_dir = restore_config(engine, savepoint, state_drop, state_keep, report.warnings)
         return _replay(engine, candidate, rec, report, baseline, golden, update_golden, last, last_ms, limit, order,
-                       keys, tolerance, ignore, timeout, config)
+                       keys, tolerance, ignore, timeout, config, clock)
     finally:
         if state_dir:
             shutil.rmtree(state_dir, ignore_errors=True)
@@ -460,7 +462,7 @@ def restore_config(engine, savepoint: str, drop, keep, warnings: list[str]) -> t
 
 
 def _replay(engine, candidate, rec, report, baseline, golden, update_golden, last, last_ms, limit, order,
-            keys, tolerance, ignore, timeout, config) -> ReplayReport:
+            keys, tolerance, ignore, timeout, config, clock=None) -> ReplayReport:
     given, parts = given_from(candidate, rec, last_ms, limit, order, report.warnings)
     report.replayed = sum(len(v) for k, v in given.items() if k in rec.records)
     if last:
@@ -469,7 +471,14 @@ def _replay(engine, candidate, rec, report, baseline, golden, update_golden, las
     if baseline is not None:
         bgiven, bparts = given_from(baseline, rec, last_ms, limit, order, [])
         versions.append((baseline, bgiven, bparts))
-    results = run_versions(engine, versions, timeout, config)
+    if clock:
+        from .clock import ClockError, instant
+        try:
+            instant(clock)
+        except ClockError as e:
+            raise ReplayError(str(e)) from None
+        report.warnings.append(f"clock frozen at {clock}: CURRENT_TIMESTAMP, NOW() ... read that instant")
+    results = run_versions(engine, versions, timeout, config, clock)
     report.millis = max(r.millis for r in results)
     for label, r in zip(("candidate", "baseline"), results):
         if r.job_error:
@@ -478,14 +487,14 @@ def _replay(engine, candidate, rec, report, baseline, golden, update_golden, las
         return report
     cand = sink_outputs(results[0])
     if baseline is not None:
-        compare(report, candidate, cand, sink_outputs(results[1]), keys or {}, tolerance, ignore, baseline)
+        compare(report, candidate, cand, sink_outputs(results[1]), keys or {}, tolerance, ignore, baseline, bool(clock))
     elif golden:
         if update_golden or not os.path.isdir(golden):
             write_golden(golden, cand)
             report.warnings.append(f"golden outputs written to {golden} ({len(cand)} sink(s)); commit them")
             report.sinks = [SinkDiff(k, None, len(v.rows), None, "golden written") for k, v in cand.items()]
         else:
-            compare(report, candidate, cand, read_golden(golden), keys or {}, tolerance, ignore)
+            compare(report, candidate, cand, read_golden(golden), keys or {}, tolerance, ignore, None, bool(clock))
     else:
         report.sinks = [SinkDiff(k, None, len(v.rows), None, "no baseline") for k, v in cand.items()]
     return report
@@ -516,7 +525,7 @@ def cmd_replay(args) -> int:
                             update_golden=args.update_golden, last=args.last, limit=args.limit, order=args.order,
                             keys=parse_keys(args.key), tolerance=args.tolerance, ignore=args.ignore,
                             timeout=args.timeout, savepoint=args.from_savepoint, state_drop=args.state_drop,
-                            state_keep=args.state_keep)
+                            state_keep=args.state_keep, clock=args.clock)
     finally:
         cleanup()
     print(report.text(style))

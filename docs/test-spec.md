@@ -78,6 +78,12 @@ id and a time one minute after the previous one.
 **Times.** Timestamps are UTC unless they carry an offset. `+5m`, `-30s`, `+1h30m`, `+250ms` are
 relative to `base_time` (default `2026-01-01 00:00:00`), in inputs and in expected rows.
 
+**Clock.** `clock: "2026-11-06 12:30:00"` (a test, or file-wide in `defaults`; UTC unless it carries an
+offset, or `base_time` for the test's own) freezes `CURRENT_TIMESTAMP`, `NOW()`, `LOCALTIMESTAMP`,
+`CURRENT_DATE`, `CURRENT_TIME`, `UNIX_TIMESTAMP()` and `CURRENT_ROW_TIMESTAMP()` at that instant, so a
+model that stamps or ages rows can be asserted exactly (including `<model>.quarantined`'s
+`_quarantined_at`). `PROCTIME()` is not frozen: processing-time windows need the real clock.
+
 **Files.** `orders: {file: fixtures/orders.csv}`: CSV with a header (empty cells are null),
 `.jsonl`, `.json` or `.yaml` (a list of rows); `.gz` works. Paths are relative to the test file.
 A mapping can combine `file`, `generate` and `rows` (in that order), plus `partitions` and

@@ -13,6 +13,8 @@ from .fixtures import SourceInfo
 NONDETERMINISTIC = re.compile(
     r"\b(CURRENT_TIMESTAMP|CURRENT_DATE|CURRENT_TIME|LOCALTIMESTAMP|LOCALTIME|NOW|PROCTIME|"
     r"CURRENT_ROW_TIMESTAMP|UNIX_TIMESTAMP\s*\(\s*\)|RAND|RAND_INTEGER|UUID)\b", re.IGNORECASE)
+# what a frozen clock (clock.py) leaves nondeterministic: randomness and processing time
+STILL_NONDETERMINISTIC = re.compile(r"\b(PROCTIME|RAND|RAND_INTEGER|UUID)\b", re.IGNORECASE)
 
 
 class ProjectError(Exception):
@@ -125,16 +127,18 @@ class Project:
     def models_with_expectations(self, among) -> list[str]:
         return [m for m in self.checked.order if m in among and self.pipeline.models[m].expectations]
 
-    def nondeterministic_columns(self, target: str) -> list[str]:
+    def nondeterministic_columns(self, target: str, frozen: bool = False) -> list[str]:
         """Output columns computed from processing time or randomness (excluded from snapshots and
-        replay diffs, where they would always differ)."""
+        replay diffs, where they would always differ). With `frozen` (the clock is frozen, clock.py),
+        only the columns the frozen clock doesn't fix."""
+        pattern = STILL_NONDETERMINISTIC if frozen else NONDETERMINISTIC
         rel = self.pipeline.relations.get(self.relation_of(target))
         cols = []
         if rel and rel.columns:
             for c in rel.columns:
-                if c.expr and NONDETERMINISTIC.search(c.expr):
+                if c.expr and pattern.search(c.expr):
                     cols.append(c.name)
-        if target.endswith(".quarantined") or target.endswith("__quarantine"):
+        if not frozen and (target.endswith(".quarantined") or target.endswith("__quarantine")):
             cols.append("_quarantined_at")
         for f in self.pipeline.functions.values():
             if not f.deterministic and rel and rel.columns:

@@ -184,6 +184,10 @@ public final class Engine {
             Matcher m = SET.matcher(s);
             if (m.matches()) {
                 tEnv.getConfig().getConfiguration().setString(m.group(1), m.group(2).replace("''", "'"));
+            } else if (s.startsWith("-- @@")) {
+                // cascade runner directives (replication-slot guards): they act on restore, and a test
+                // never restores from a live database, so there is nothing to check here
+                continue;
             } else if (!s.isEmpty()) {
                 tEnv.executeSql(s);
             }
